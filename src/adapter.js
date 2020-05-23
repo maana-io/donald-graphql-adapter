@@ -1,18 +1,49 @@
 // --- Exdternal imports
-import { getIntrospectionQuery, print } from 'graphql'
+import {
+  print,
+  GraphQLBoolean,
+  GraphQLString,
+  GraphQLInt,
+  GraphQLFloat,
+  GraphQLList,
+  GraphQLInputObjectType,
+  GraphQLObjectType,
+  GraphQLNonNull,
+  GraphQLSchema,
+  GraphQLID,
+} from 'graphql'
 import { fetch } from 'cross-fetch'
-import { makeRemoteExecutableSchema } from 'graphql-tools'
+import { GraphQLDate, GraphQLDateTime, GraphQLTime } from 'graphql-iso-date'
+import { GraphQLJSON } from 'graphql-type-json'
 
 import {
   wrapSchema,
   introspectSchema,
-  FieldTransformer,
   TransformObjectFields,
 } from '@graphql-tools/wrap'
 // --- Internal imports
 import { log } from './utils.js'
 
 // --- Constants
+
+const ScalarToGraphQLObject = {
+  BOOLEAN: GraphQLBoolean,
+  FLOAT: GraphQLFloat,
+  ID: GraphQLID,
+  INT: GraphQLInt,
+  STRING: GraphQLString,
+  //
+  JSON: GraphQLJSON,
+  //
+  DATE: GraphQLDate,
+  DATETIME: GraphQLDateTime,
+  TIME: GraphQLTime,
+}
+
+const ModifiersEnum = {
+  NONULL: 'NONULL',
+  LIST: 'LIST',
+}
 
 // ---
 
@@ -30,9 +61,8 @@ const createExecutor = (endpointUrl) => async ({ document, variables }) => {
 
 // ---
 
-const fieldRenames = [
+const fieldRewrites = [
   {
-    type: null,
     from: {
       name: 'code',
       type: 'ID!',
@@ -41,7 +71,32 @@ const fieldRenames = [
       name: 'id',
     },
   },
+  {
+    type: 'State',
+    from: {
+      name: 'code',
+    },
+    to: {
+      name: 'id',
+      type: {
+        name: 'ID',
+        modifiers: ['NONULL'],
+      },
+    },
+    copyIfNullFrom: 'name',
+  },
 ]
+
+const typeToGraphQLType = (type) => {
+  const base = ScalarToGraphQLObject[type.name]
+  if (!base) throw new Error(`Unknown type: ${type.name}`)
+  if (type.modifiers.includes('LIST')) {
+    return new GraphQLNonNull(GraphQLList(new GraphQLNonNull(base)))
+  } else if (type.modifiers.includes('NONULL')) {
+    return new GraphQLNonNull(base)
+  }
+  return base
+}
 
 export const createAdapter = async (
   endpointUrl = 'https://countries.trevorblades.com/'
@@ -49,7 +104,7 @@ export const createAdapter = async (
   const state = {}
   const executor = createExecutor(endpointUrl)
   const transforms = [
-    ...fieldRenames.map(
+    ...fieldRewrites.map(
       (fr) =>
         new TransformObjectFields((typeName, fieldName, fieldConfig) => {
           if (!fr.type || fr.type === typeName) {
@@ -58,14 +113,51 @@ export const createAdapter = async (
                 !fr.from.type ||
                 fr.from.type === fieldConfig.type.toString()
               ) {
-                console.log(typeName, fieldName, fieldConfig)
-                return [fr.to.name, fieldConfig]
+                // console.log(typeName, fieldName, fieldConfig)
+                const newFieldConfig = {
+                  ...fieldConfig,
+                  type: fr.to.type
+                    ? typeToGraphQLType(fr.to.type)
+                    : fieldConfig.type,
+                  resolve: fr.copyIfNullFrom
+                    ? (parent, root, context, info) => {
+                        const result = fieldConfig.resolve(
+                          parent,
+                          root,
+                          context,
+                          info
+                        )
+                        return result || parent.name
+                      }
+                    : fieldConfig.resolve,
+                }
+                return [fr.to.name, newFieldConfig]
               }
             }
           }
           return fieldConfig
         })
     ),
+
+    // new TransformObjectFields((typeName, fieldName, fieldConfig) => {
+    //   if (typeName === 'State') {
+    //     if (fieldName === 'code') {
+    //       // console.log(typeName, fieldName, fieldConfig)
+    //       const newFieldConfig = {
+    //         ...fieldConfig,
+    //         type: new GraphQLNonNull(GraphQLID),
+    //         resolve: (parent, root, context, info) => {
+    //           const result = fieldConfig.resolve(parent, root, context, info)
+    //           // console.log(`root: ${JSON.stringify(parent)}, result: ${result}`)
+    //           return result || parent.name
+    //         },
+    //       }
+    //       return ['id', newFieldConfig]
+    //     }
+    //   }
+
+    //   return fieldConfig
+    // }),
   ]
 
   state.schema = wrapSchema({
